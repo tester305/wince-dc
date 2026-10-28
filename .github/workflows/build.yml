@@ -1,0 +1,180 @@
+# GitHub Actions CI for the Windows CE 2.00 shell (Sega Dreamcast / KallistiOS)
+#
+# What this does:
+#   1. Builds the KallistiOS SH-4 cross toolchain from source via kos-chain
+#      (cached after the first run, so later builds take a few minutes only)
+#   2. Builds KallistiOS itself
+#   3. Compiles the project:  main.c -> wince.elf -> 1ST_READ.BIN
+#   4. Builds TWO DiscJuggler images with mkdcdisc (gitlab.com/simulant/mkdcdisc):
+#        wince.cdi       - padded to full CD size (default, best loading speed)
+#        wince-nopad.cdi - non-padded (smaller)
+#   5. Uploads wince.elf, 1ST_READ.BIN and both CDIs as a workflow artifact
+#      (and attaches them to GitHub Releases when you publish a release)
+#
+# Expected repo layout (files at repository root):
+#   main.c
+#   Makefile
+#   .github/workflows/build.yml   <- this file
+#
+# Notes:
+#   - The very first run takes roughly 20-40 minutes (toolchain compile).
+#     Every run after that reuses the cache and finishes in ~5 minutes.
+#   - "kos_ref" lets you pin a KallistiOS branch/tag via manual dispatch.
+#   - To force a toolchain rebuild, bump TC_CACHE_VER below.
+
+name: Build Dreamcast (KallistiOS)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      kos_ref:
+        description: 'KallistiOS git ref (branch or tag) to build against'
+        required: false
+        default: 'master'
+  release:
+    types: [ published ]
+
+env:
+  KOS_REF: master
+  MKDCDISC_REF: main      # mkdcdisc branch/tag to build the disc tool from
+  TC_CACHE_VER: v1        # bump to force a fresh toolchain build
+
+permissions:
+  contents: write         # needed to attach files to a release
+
+jobs:
+  build:
+    name: Build wince.elf + 1ST_READ.BIN
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v4
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential texinfo libgmp-dev libmpfr-dev libmpc-dev \
+            libelf-dev wget python3 \
+            meson ninja-build pkg-config libisofs-dev libpng-dev
+
+      - name: Build mkdcdisc (disc image generator)
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${{ env.MKDCDISC_REF }}" \
+            https://gitlab.com/simulant/mkdcdisc.git mkdcdisc
+          meson setup mkdcdisc/builddir mkdcdisc -Dpng=enabled
+          meson compile -C mkdcdisc/builddir
+          mkdcdisc/builddir/mkdcdisc -h > /dev/null && echo "mkdcdisc ready"
+
+      - name: Clone KallistiOS (${{ inputs.kos_ref || env.KOS_REF }})
+        run: |
+          git clone --depth 1 --branch "${{ inputs.kos_ref || env.KOS_REF }}" \
+            https://github.com/KallistiOS/KallistiOS.git kos
+          echo "KOS commit: $(git -C kos rev-parse --short HEAD)"
+
+      - name: Restore KOS toolchain from cache
+        id: tc-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /opt/toolchains/dc/sh-elf
+          key: kos-chain-dreamcast-${{ env.TC_CACHE_VER }}-${{ hashFiles('kos/utils/kos-chain/Makefile', 'kos/utils/kos-chain/Makefile.dreamcast.cfg', 'kos/utils/kos-chain/profiles/**') }}
+          restore-keys: |
+            kos-chain-dreamcast-${{ env.TC_CACHE_VER }}-
+
+      - name: Prepare toolchain install directory
+        run: |
+          sudo mkdir -p /opt/toolchains/dc
+          sudo chown -R "$(id -u):$(id -g)" /opt/toolchains
+
+      - name: Build SH-4 toolchain (kos-chain, stable profile)
+        if: steps.tc-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          # pin the Dreamcast config deterministically
+          cp kos/utils/kos-chain/Makefile.dreamcast.cfg kos/utils/kos-chain/Makefile.cfg
+          make -C kos/utils/kos-chain -j"$(nproc)"
+
+      - name: Save toolchain to cache
+        if: steps.tc-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /opt/toolchains/dc/sh-elf
+          key: kos-chain-dreamcast-${{ env.TC_CACHE_VER }}-${{ hashFiles('kos/utils/kos-chain/Makefile', 'kos/utils/kos-chain/Makefile.dreamcast.cfg', 'kos/utils/kos-chain/profiles/**') }}
+
+      - name: Add toolchain to PATH
+        run: echo "/opt/toolchains/dc/sh-elf/bin" >> "$GITHUB_PATH"
+
+      - name: Build KallistiOS
+        run: |
+          set -e
+          cd kos
+          if [ -f ./environ.sh ]; then
+            # shellcheck disable=SC1091
+            . ./environ.sh
+          else
+            echo "::warning::environ.sh not found at KOS root, falling back to env/environ_base.sh"
+            # shellcheck disable=SC1091
+            . ./env/environ_base.sh
+          fi
+          make -j"$(nproc)"
+
+      - name: Build Windows CE shell (wince.elf + 1ST_READ.BIN)
+        run: |
+          set -e
+          cd kos
+          # shellcheck disable=SC1091
+          . ./environ.sh
+          cd "$GITHUB_WORKSPACE"
+          make clean || true
+          make
+          make 1ST_READ.BIN
+          file wince.elf 1ST_READ.BIN
+
+      - name: Build CDI disc images (padded + non-padded)
+        run: |
+          set -e
+          MDC="$GITHUB_WORKSPACE/mkdcdisc/builddir/mkdcdisc"
+          # Padded (default): data track padded out to full CD size,
+          # optimizes in-game loading speed
+          "$MDC" --no-banner --allow-overwrite -e wince.elf -V WINCE200 -o wince.cdi
+          # Non-padded: same disc, but without the padding sectors (smaller file)
+          "$MDC" --no-banner --allow-overwrite -e wince.elf -V WINCE200 \
+            --disable-data-track-padding -o wince-nopad.cdi
+          ls -lh wince.cdi wince-nopad.cdi
+
+      - name: Collect build outputs
+        run: |
+          mkdir -p dist
+          cp -v wince.elf dist/
+          cp -v 1ST_READ.BIN dist/
+          cp -v wince.cdi dist/
+          cp -v wince-nopad.cdi dist/
+          {
+            echo "### Dreamcast build results"
+            echo '```'
+            ls -lh dist/
+            echo '```'
+            echo "- **wince.elf** - load directly in Flycast/Redream or via dc-tool"
+            echo "- **1ST_READ.BIN** - raw (unscrambled) binary for SD/serial boot"
+            echo "- **wince.cdi** - DiscJuggler image, padded to full CD size (best loading)"
+            echo "- **wince-nopad.cdi** - DiscJuggler image, non-padded (smaller download)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wince-dc
+          path: dist/
+          if-no-files-found: error
+
+      - name: Attach build to GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
