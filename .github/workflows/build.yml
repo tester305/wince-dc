@@ -24,7 +24,7 @@ permissions:
 jobs:
   build:
     name: Build wince.elf + 1ST_READ.BIN
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
 
     steps:
@@ -36,8 +36,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential texinfo libgmp-dev libmpfr-dev libmpc-dev \
-            libelf-dev wget python3 \
-            meson ninja-build pkg-config libisofs-dev libpng-dev
+            libelf-dev wget python3 gettext bison flex cc65 \
+            libjpeg-dev libpng-dev meson ninja-build pkg-config libisofs-dev
 
       - name: Build mkdcdisc (disc image generator)
         run: |
@@ -48,55 +48,54 @@ jobs:
           meson compile -C mkdcdisc/builddir
           mkdcdisc/builddir/mkdcdisc -h > /dev/null && echo "mkdcdisc ready"
 
-      - name: Clone KallistiOS & Generate environ.sh
+      - name: Clone KallistiOS and set up environ.sh
         run: |
+          sudo mkdir -p /opt/toolchains/dc
+          sudo chown -R "$USER":"$USER" /opt/toolchains
           git clone --depth 1 --branch "${{ inputs.kos_ref || env.KOS_REF }}" \
-            https://github.com/KallistiOS/KallistiOS.git kos
-          echo "KOS commit: $(git -C kos rev-parse --short HEAD)"
-          cp kos/doc/environ.sh.sample kos/environ.sh
-          sed -i "s|export KOS_BASE=.*|export KOS_BASE=\"$GITHUB_WORKSPACE/kos\"|g" kos/environ.sh
+            https://github.com/KallistiOS/KallistiOS.git /opt/toolchains/dc/kos
+          echo "KOS commit: $(git -C /opt/toolchains/dc/kos rev-parse --short HEAD)"
+          cp /opt/toolchains/dc/kos/doc/environ.sh.sample /opt/toolchains/dc/kos/environ.sh
 
       - name: Restore KOS toolchain from cache
         id: tc-cache
         uses: actions/cache/restore@v4
         with:
           path: /opt/toolchains/dc/sh-elf
-          key: kos-chain-dreamcast-${{ env.TC_CACHE_VER }}-${{ hashFiles('kos/utils/kos-chain/Makefile', 'kos/utils/kos-chain/Makefile.dreamcast.cfg', 'kos/utils/kos-chain/profiles/**') }}
+          key: kos-chain-dreamcast-${{ env.TC_CACHE_VER }}-${{ hashFiles('/opt/toolchains/dc/kos/utils/kos-chain/Makefile', '/opt/toolchains/dc/kos/utils/kos-chain/Makefile.dreamcast.cfg', '/opt/toolchains/dc/kos/utils/kos-chain/profiles/**') }}
           restore-keys: |
             kos-chain-dreamcast-${{ env.TC_CACHE_VER }}-
-
-      - name: Prepare toolchain install directory
-        run: |
-          sudo mkdir -p /opt/toolchains/dc
-          sudo chown -R "$(id -u):$(id -g)" /opt/toolchains
 
       - name: Build SH-4 toolchain (kos-chain, stable profile)
         if: steps.tc-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          cp kos/utils/kos-chain/Makefile.dreamcast.cfg kos/utils/kos-chain/Makefile.cfg
-          make -C kos/utils/kos-chain -j"$(nproc)"
+          cd /opt/toolchains/dc/kos/utils/kos-chain
+          cp Makefile.dreamcast.cfg Makefile.cfg
+          sed -i "s/^makejobs=.*/makejobs=$(nproc)/" Makefile.cfg
+          make
 
       - name: Save toolchain to cache
         if: steps.tc-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: /opt/toolchains/dc/sh-elf
-          key: kos-chain-dreamcast-${{ env.TC_CACHE_VER }}-${{ hashFiles('kos/utils/kos-chain/Makefile', 'kos/utils/kos-chain/Makefile.dreamcast.cfg', 'kos/utils/kos-chain/profiles/**') }}
+          key: kos-chain-dreamcast-${{ env.TC_CACHE_VER }}-${{ hashFiles('/opt/toolchains/dc/kos/utils/kos-chain/Makefile', '/opt/toolchains/dc/kos/utils/kos-chain/Makefile.dreamcast.cfg', '/opt/toolchains/dc/kos/utils/kos-chain/profiles/**') }}
 
       - name: Add toolchain to PATH
         run: echo "/opt/toolchains/dc/sh-elf/bin" >> "$GITHUB_PATH"
 
       - name: Build KallistiOS
         run: |
-          set -e
-          cd kos
-          source ./environ.sh
+          . /opt/toolchains/dc/kos/environ.sh
+          cd "$KOS_BASE"
           make -j"$(nproc)"
 
       - name: Build Windows CE shell (wince.elf + 1ST_READ.BIN)
         run: |
           chmod +x build.sh
+          # Export KOS_BASE so build.sh picks up the absolute path cleanly
+          export KOS_BASE="/opt/toolchains/dc/kos"
           ./build.sh clean || true
           ./build.sh
           ./build.sh 1ST_READ.BIN
