@@ -17,7 +17,7 @@
  *   - On-screen Input Panel (SIP) for gamepad text entry
  *   - Auto-writable save: /ram, then /pc (SD/IDE), then /vmu/a0
  *   - AICA startup/click/error sounds (set USE_SOUND 0 if your KOS
- *     lacks <kos/snd_sfx.h>)
+ *     lacks <dc/sound/sfxmgr.h>)
  *   - "Flying windows" screensaver after 60 s idle
  *
  * The shell can NOT run retail Windows CE binaries: CE was only ever
