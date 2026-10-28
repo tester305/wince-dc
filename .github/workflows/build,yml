@@ -4,23 +4,12 @@
 #   1. Builds the KallistiOS SH-4 cross toolchain from source via kos-chain
 #      (cached after the first run, so later builds take a few minutes only)
 #   2. Builds KallistiOS itself
-#   3. Compiles the project:  main.c -> wince.elf -> 1ST_READ.BIN
+#   3. Compiles the project via build.sh: main.c -> wince.elf -> 1ST_READ.BIN
 #   4. Builds TWO DiscJuggler images with mkdcdisc (gitlab.com/simulant/mkdcdisc):
 #        wince.cdi       - padded to full CD size (default, best loading speed)
 #        wince-nopad.cdi - non-padded (smaller)
 #   5. Uploads wince.elf, 1ST_READ.BIN and both CDIs as a workflow artifact
 #      (and attaches them to GitHub Releases when you publish a release)
-#
-# Expected repo layout (files at repository root):
-#   main.c
-#   Makefile
-#   .github/workflows/build.yml   <- this file
-#
-# Notes:
-#   - The very first run takes roughly 20-40 minutes (toolchain compile).
-#     Every run after that reuses the cache and finishes in ~5 minutes.
-#   - "kos_ref" lets you pin a KallistiOS branch/tag via manual dispatch.
-#   - To force a toolchain rebuild, bump TC_CACHE_VER below.
 
 name: Build Dreamcast (KallistiOS)
 
@@ -126,14 +115,10 @@ jobs:
 
       - name: Build Windows CE shell (wince.elf + 1ST_READ.BIN)
         run: |
-          set -e
-          cd kos
-          # shellcheck disable=SC1091
-          . ./environ.sh
-          cd "$GITHUB_WORKSPACE"
-          make clean || true
-          make
-          make 1ST_READ.BIN
+          chmod +x build.sh
+          ./build.sh clean || true
+          ./build.sh
+          ./build.sh 1ST_READ.BIN
           file wince.elf 1ST_READ.BIN
 
       - name: Build CDI disc images (padded + non-padded)
@@ -178,3 +163,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+
