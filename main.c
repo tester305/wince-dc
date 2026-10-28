@@ -58,7 +58,7 @@
 #define USE_SOUND 1
 #if USE_SOUND
 #include <dc/spu.h>
-#include <kos/snd_sfx.h>
+#include <dc/sound/sfxmgr.h>
 #endif
 
 /* ------------------------------------------------------------------ */
